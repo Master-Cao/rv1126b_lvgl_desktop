@@ -1,0 +1,2 @@
+# rv1126b_lvgl_desktop
+在rv1126b上的lvgl桌面程序
