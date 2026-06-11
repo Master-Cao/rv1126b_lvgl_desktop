@@ -1,0 +1,106 @@
+#!/bin/sh
+#
+# RV1126B LVGL 桌面自启动
+#
+# 安装路径：/etc/init.d/S10rv1126b_desktop
+# 由 install_board.sh 自动安装，亦可手动 cp 后 chmod +x。
+#
+
+APP_DIR=/userdata
+APP_NAME=rv1126b_desktop
+
+# 可执行文件：/userdata/rv1126b_desktop
+APP_BIN=""
+for candidate in "$APP_DIR/$APP_NAME"; do
+    if [ -x "$candidate" ]; then
+        APP_BIN="$candidate"
+        break
+    fi
+done
+
+# OCR 模型路径（ocr_algo.cc 默认值，可被环境变量覆盖）
+OCR_MODEL_DIR=/opt/rv1126b_desktop/models
+export OCR_DET_MODEL=${OCR_DET_MODEL:-$OCR_MODEL_DIR/ppocrv4_det.rknn}
+export OCR_REC_MODEL=${OCR_REC_MODEL:-$OCR_MODEL_DIR/ppocrv4_rec.rknn}
+export DETECT_MODEL=${DETECT_MODEL:-$OCR_MODEL_DIR/yolov8.rknn}
+
+# 若板上 librknnrt.so / libopencv_*.so 不在默认 ldconfig 路径，可在此追加
+# export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# 后续支持自定义字体时使用
+# export RV1126B_FONT=/usr/share/fonts/source-han-sans-cn/SourceHanSansCN-Normal.otf
+
+LOG_FILE=/tmp/rv1126b_desktop.log
+
+start() {
+    echo "Starting $APP_NAME..."
+
+    if [ -z "$APP_BIN" ]; then
+        echo "Error: cannot locate $APP_NAME executable at $APP_DIR/$APP_NAME"
+        return 1
+    fi
+
+    if pidof "$APP_NAME" >/dev/null 2>&1; then
+        echo "$APP_NAME already running"
+        return 0
+    fi
+
+    # 模型文件存在性检查（不强制阻止启动，仅提示）
+    [ ! -f "$OCR_DET_MODEL" ] && echo "Warn: OCR det model not found: $OCR_DET_MODEL"
+    [ ! -f "$OCR_REC_MODEL" ] && echo "Warn: OCR rec model not found: $OCR_REC_MODEL"
+    [ ! -f "$DETECT_MODEL" ] && echo "Warn: YOLOv8 model not found: $DETECT_MODEL"
+
+    cd "$(dirname "$APP_BIN")" || return 1
+
+    # 等显示/输入节点就绪（按需调整秒数）
+    sleep 2
+
+    "$APP_BIN" >"$LOG_FILE" 2>&1 &
+    echo "$APP_NAME started, pid=$!, log=$LOG_FILE"
+    echo "  bin=$APP_BIN"
+    echo "  OCR_DET_MODEL=$OCR_DET_MODEL"
+    echo "  OCR_REC_MODEL=$OCR_REC_MODEL"
+    echo "  DETECT_MODEL=$DETECT_MODEL"
+}
+
+stop() {
+    echo "Stopping $APP_NAME..."
+    killall "$APP_NAME" 2>/dev/null
+    sleep 1
+
+    if pidof "$APP_NAME" >/dev/null 2>&1; then
+        killall -9 "$APP_NAME" 2>/dev/null
+    fi
+}
+
+status() {
+    if pidof "$APP_NAME" >/dev/null 2>&1; then
+        echo "$APP_NAME running, pid=$(pidof "$APP_NAME")"
+        echo "  bin=$APP_BIN"
+    else
+        echo "$APP_NAME stopped"
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

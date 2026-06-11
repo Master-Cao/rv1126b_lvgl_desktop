@@ -1,0 +1,16 @@
+# Build output
+build/
+cmake-build-*/
+
+# Compiled objects and libraries
+*.o
+*.a
+*.so
+*.rknn
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+.DS_Store
+Thumbs.db

@@ -1,0 +1,135 @@
+#!/bin/sh
+#
+# RV1126B GPIO 开机初始化
+#
+# 安装路径：/etc/init.d/S09gpio_init
+#   （编号 S09 < S10rv1126b_desktop，确保桌面程序启动前 GPIO 已就绪）
+# 安装：cp scripts/S09gpio_init /etc/init.d/ && chmod +x /etc/init.d/S09gpio_init
+#
+# 作用：开机自动 export 指定 GPIO 并设置方向/初始电平，
+#       省去每次进入程序手动切换。
+#
+
+GPIO_DIR=/sys/class/gpio
+
+#
+# 配置表：每行一个引脚，格式 "引脚号 方向 [初始电平]"
+#   - 引脚号：sysfs 编号，按 bank*32 + group*8 + index 换算
+#       GPIO5_C1 = 5*32 + 2*8 + 1 = 177
+#       GPIO3_A4 = 3*32 + 0*8 + 4 = 100
+#       GPIO3_A5 = 3*32 + 0*8 + 5 = 101
+#       GPIO7_A1 = 7*32 + 0*8 + 1 = 225
+#       GPIO7_A4 = 7*32 + 0*8 + 4 = 228
+#       GPIO3_A0 = 3*32 + 0*8 + 0 = 96
+#       GPIO3_A1 = 3*32 + 0*8 + 1 = 97
+#   - 方向：out 或 in
+#   - 初始电平：仅 out 有效，1=高 0=低，省略则默认 0
+#
+# !!! 按实际需求修改下面的方向与初始电平 !!!
+#
+GPIO_TABLE="
+177 out 0
+100 out 0
+101 out 0
+225 out 0
+228 out 0
+96 in
+97 in
+"
+
+# 导出并配置单个引脚
+setup_gpio() {
+    pin="$1"
+    dir="$2"
+    val="$3"
+
+    # 已导出则跳过 export（避免 Device or resource busy）
+    if [ ! -d "$GPIO_DIR/gpio$pin" ]; then
+        echo "$pin" > "$GPIO_DIR/export" 2>/dev/null
+        if [ ! -d "$GPIO_DIR/gpio$pin" ]; then
+            echo "  gpio$pin export 失败（被占用或编号无效）"
+            return 1
+        fi
+    fi
+
+    echo "$dir" > "$GPIO_DIR/gpio$pin/direction" 2>/dev/null || {
+        echo "  gpio$pin 设方向 $dir 失败"
+        return 1
+    }
+
+    if [ "$dir" = "out" ]; then
+        [ -z "$val" ] && val=0
+        echo "$val" > "$GPIO_DIR/gpio$pin/value" 2>/dev/null
+        echo "  gpio$pin -> out, value=$val"
+    else
+        echo "  gpio$pin -> in"
+    fi
+}
+
+# 释放单个引脚
+release_gpio() {
+    pin="$1"
+    if [ -d "$GPIO_DIR/gpio$pin" ]; then
+        echo "$pin" > "$GPIO_DIR/unexport" 2>/dev/null
+    fi
+}
+
+start() {
+    echo "GPIO init..."
+    echo "$GPIO_TABLE" | while read -r pin dir val; do
+        [ -z "$pin" ] && continue
+        case "$pin" in
+            \#*) continue ;;   # 跳过注释行
+        esac
+        setup_gpio "$pin" "$dir" "$val"
+    done
+}
+
+stop() {
+    echo "GPIO release..."
+    echo "$GPIO_TABLE" | while read -r pin dir val; do
+        [ -z "$pin" ] && continue
+        case "$pin" in
+            \#*) continue ;;
+        esac
+        release_gpio "$pin"
+    done
+}
+
+status() {
+    echo "$GPIO_TABLE" | while read -r pin dir val; do
+        [ -z "$pin" ] && continue
+        case "$pin" in
+            \#*) continue ;;
+        esac
+        if [ -d "$GPIO_DIR/gpio$pin" ]; then
+            cur_dir=$(cat "$GPIO_DIR/gpio$pin/direction" 2>/dev/null)
+            cur_val=$(cat "$GPIO_DIR/gpio$pin/value" 2>/dev/null)
+            echo "gpio$pin: dir=$cur_dir value=$cur_val"
+        else
+            echo "gpio$pin: 未导出"
+        fi
+    done
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,8 @@
+#include <lvgl/lvgl.h>
+
+#ifndef LVGL_BACKBUTTON_BACKBUTTON_104978_H
+#define LVGL_BACKBUTTON_BACKBUTTON_104978_H
+
+LV_IMG_DECLARE(backbutton_104978);
+
+#endif
