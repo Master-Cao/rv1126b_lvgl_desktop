@@ -1,5 +1,5 @@
 /*
- * 车牌识别应用页面：相机预览 + 结果面板 + 工具栏，算法为 plate_algo。
+ * 车牌检测应用页面：相机预览画框 + 结果面板，算法为 plate_algo（仅检测，不识别）。
  */
 #include "plate_app.h"
 
@@ -112,6 +112,7 @@ static void apply_plate_result(const plate_result_set_t *res) {
             boxes[i].x4 = res->plates[i].box.x4;
             boxes[i].y4 = res->plates[i].box.y4;
         }
+        /* n==0 时也会清除预览上的旧框 */
         camera_preview_set_boxes(g_plate.preview, boxes, n, res->src_w, res->src_h);
         camera_preview_set_ocr_ms(g_plate.preview, res->det_ms);
     }
@@ -122,13 +123,12 @@ static void apply_plate_result(const plate_result_set_t *res) {
         } else {
             char buf[768];
             int off = 0;
-            off += snprintf(buf + off, sizeof(buf) - off, "检测到 %d 个车牌\n\n", res->count);
+            off += snprintf(buf + off, sizeof(buf) - off, "检测到 %d 个目标\n\n", res->count);
             int show =
                 res->count > PLATE_MAX_SUMMARY_LINES ? PLATE_MAX_SUMMARY_LINES : res->count;
             for (int i = 0; i < show && off < (int)sizeof(buf) - 48; i++) {
                 const plate_item_t *p = &res->plates[i];
-                const char *text = (p->text[0] != '\0') ? p->text : "plate";
-                off += snprintf(buf + off, sizeof(buf) - off, "%s  %.1f%%\n", text,
+                off += snprintf(buf + off, sizeof(buf) - off, "目标 %d  %.1f%%\n", i + 1,
                                 p->det_score * 100.0f);
             }
             if (res->count > show) {
@@ -175,7 +175,7 @@ static void on_back_clicked(lv_event_t *e) {
         stop_camera_preview();
         set_action_enabled(true, false);
         if (g_plate.result) {
-            result_panel_set_text(g_plate.result, "等待识别...");
+            result_panel_set_text(g_plate.result, "等待检测...");
         }
     }
     if (g_plate.ctx && g_plate.ctx->on_back) {
@@ -234,7 +234,7 @@ static void on_stop_clicked(lv_event_t *e) {
     g_plate.running = false;
     stop_plate_pipeline();
     stop_camera_preview();
-    result_panel_set_text(g_plate.result, "等待识别...");
+    result_panel_set_text(g_plate.result, "等待检测...");
     set_action_enabled(true, false);
 }
 
@@ -268,7 +268,7 @@ lv_obj_t *plate_app_create(lv_obj_t *parent, const lvgl_app_context_t *ctx) {
         result_panel_create(g_plate.page, PLATE_RIGHT_W, PLATE_RESULT_H, g_plate.text_font);
     if (g_plate.result) {
         lv_obj_set_pos(g_plate.result->root, right_x, PLATE_PAGE_PAD);
-        result_panel_set_text(g_plate.result, "等待识别...");
+        result_panel_set_text(g_plate.result, "等待检测...");
     }
 
     g_plate.toolbar = lv_obj_create(g_plate.page);

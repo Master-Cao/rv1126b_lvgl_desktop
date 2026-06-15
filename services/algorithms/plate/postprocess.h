@@ -10,7 +10,7 @@
 #define OBJ_NUMB_MAX_SIZE 128
 #define OBJ_CLASS_NUM     1
 #define NMS_THRESH        0.45f
-#define BOX_THRESH        0.25f
+#define BOX_THRESH        0.15f
 
 typedef struct {
     image_rect_t box;

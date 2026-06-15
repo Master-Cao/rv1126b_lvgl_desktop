@@ -16,6 +16,26 @@ static const char *kPlateLabels[OBJ_CLASS_NUM] = {
     "plate",
 };
 
+static void parse_grid_hw(const rknn_tensor_attr *attr, int *grid_h, int *grid_w)
+{
+    if (!attr || !grid_h || !grid_w || attr->n_dims < 4) {
+        if (grid_h) {
+            *grid_h = 0;
+        }
+        if (grid_w) {
+            *grid_w = 0;
+        }
+        return;
+    }
+    if (attr->fmt == RKNN_TENSOR_NCHW) {
+        *grid_h = attr->dims[2];
+        *grid_w = attr->dims[3];
+    } else {
+        *grid_h = attr->dims[1];
+        *grid_w = attr->dims[2];
+    }
+}
+
 inline static int clamp_int(float val, int min, int max)
 {
     return val > min ? (val < max ? (int)val : max) : min;
@@ -131,7 +151,7 @@ static void compute_dfl(float *tensor, int dfl_len, float *box)
 static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale, int8_t *score_tensor,
                       int32_t score_zp, float score_scale, int8_t *score_sum_tensor,
                       int32_t score_sum_zp, float score_sum_scale, int grid_h, int grid_w,
-                      int stride, int dfl_len, std::vector<float> &boxes,
+                      int stride, int dfl_len, int class_num, std::vector<float> &boxes,
                       std::vector<float> &objProbs, std::vector<int> &classId, float threshold)
 {
     int validCount = 0;
@@ -151,7 +171,7 @@ static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale, int8_
             }
 
             int8_t max_score = -score_zp;
-            for (int c = 0; c < OBJ_CLASS_NUM; c++) {
+            for (int c = 0; c < class_num; c++) {
                 if ((score_tensor[offset] > score_thres_i8) &&
                     (score_tensor[offset] > max_score)) {
                     max_score = score_tensor[offset];
@@ -189,8 +209,9 @@ static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale, int8_
 }
 
 static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum_tensor,
-                        int grid_h, int grid_w, int stride, int dfl_len, std::vector<float> &boxes,
-                        std::vector<float> &objProbs, std::vector<int> &classId, float threshold)
+                        int grid_h, int grid_w, int stride, int dfl_len, int class_num,
+                        std::vector<float> &boxes, std::vector<float> &objProbs,
+                        std::vector<int> &classId, float threshold)
 {
     int validCount = 0;
     int grid_len = grid_h * grid_w;
@@ -206,7 +227,7 @@ static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum
             }
 
             float max_score = 0;
-            for (int c = 0; c < OBJ_CLASS_NUM; c++) {
+            for (int c = 0; c < class_num; c++) {
                 if ((score_tensor[offset] > threshold) && (score_tensor[offset] > max_score)) {
                     max_score = score_tensor[offset];
                     max_class_id = c;
@@ -242,6 +263,188 @@ static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum
     return validCount;
 }
 
+/* Ultralytics YOLOv8 ONNX/RKNN 单路输出 (1, 4+C, N)，已含 cxcywh，非 DFL 三分支。 */
+static bool parse_single_output_layout(const rknn_tensor_attr *attr, int *channels, int *num_anchors,
+                                       bool *channel_major)
+{
+    if (!attr || !channels || !num_anchors || !channel_major || attr->n_dims < 2) {
+        return false;
+    }
+
+    int d1 = attr->dims[1];
+    int d2 = attr->n_dims >= 3 ? attr->dims[2] : 1;
+
+    if (attr->n_dims == 3) {
+        if (d1 <= d2) {
+            *channels = d1;
+            *num_anchors = d2;
+            *channel_major = true;
+        } else {
+            *channels = d2;
+            *num_anchors = d1;
+            *channel_major = false;
+        }
+        return *channels >= 5 && *num_anchors > 0;
+    }
+
+    if (attr->n_dims >= 4) {
+        if (attr->fmt == RKNN_TENSOR_NCHW) {
+            *channels = d1;
+            *num_anchors = attr->dims[2] * attr->dims[3];
+            *channel_major = true;
+        } else {
+            *channels = attr->dims[attr->n_dims - 1];
+            *num_anchors = d1 * d2;
+            *channel_major = false;
+        }
+        return *channels >= 5 && *num_anchors > 0;
+    }
+
+    return false;
+}
+
+static int post_process_single_output(rknn_app_context_t *app_ctx, rknn_output *outputs,
+                                      letterbox_t *letter_box, float conf_threshold,
+                                      float nms_threshold, object_detect_result_list *od_results)
+{
+    const rknn_tensor_attr *attr = &app_ctx->output_attrs[0];
+    float *data = (float *)outputs[0].buf;
+    if (!data) {
+        return 0;
+    }
+
+    int channels = 0;
+    int num_anchors = 0;
+    bool channel_major = true;
+    if (!parse_single_output_layout(attr, &channels, &num_anchors, &channel_major)) {
+        printf("plate_post: single-output layout parse fail, n_dims=%d dims=[%d,%d,%d,%d]\n",
+               attr->n_dims, attr->dims[0], attr->dims[1], attr->dims[2], attr->dims[3]);
+        return 0;
+    }
+
+    int class_num = channels - 4;
+    if (class_num <= 0) {
+        class_num = 1;
+    }
+
+    std::vector<float> filterBoxes;
+    std::vector<float> objProbs;
+    std::vector<int> classId;
+    int validCount = 0;
+    int model_in_w = app_ctx->model_width;
+    int model_in_h = app_ctx->model_height;
+
+    /* 诊断：记录全局最高分及对应框，便于判断是 score 偏低还是坐标异常 */
+    float dbg_best_score = -1e9f;
+    float dbg_best_cx = 0, dbg_best_cy = 0, dbg_best_w = 0, dbg_best_h = 0;
+    float dbg_coord_min = 1e9f, dbg_coord_max = -1e9f;
+
+    for (int i = 0; i < num_anchors; i++) {
+        float cx, cy, w, h;
+        if (channel_major) {
+            cx = data[0 * num_anchors + i];
+            cy = data[1 * num_anchors + i];
+            w = data[2 * num_anchors + i];
+            h = data[3 * num_anchors + i];
+        } else {
+            int base = i * channels;
+            cx = data[base + 0];
+            cy = data[base + 1];
+            w = data[base + 2];
+            h = data[base + 3];
+        }
+
+        float max_score = 0.f;
+        int max_class_id = 0;
+        for (int c = 0; c < class_num; c++) {
+            float score;
+            if (channel_major) {
+                score = data[(4 + c) * num_anchors + i];
+            } else {
+                score = data[i * channels + 4 + c];
+            }
+            if (score > max_score) {
+                max_score = score;
+                max_class_id = c;
+            }
+        }
+
+        if (max_score > dbg_best_score) {
+            dbg_best_score = max_score;
+            dbg_best_cx = cx;
+            dbg_best_cy = cy;
+            dbg_best_w = w;
+            dbg_best_h = h;
+        }
+        if (cx < dbg_coord_min) dbg_coord_min = cx;
+        if (cx > dbg_coord_max) dbg_coord_max = cx;
+
+        if (max_score < conf_threshold) {
+            continue;
+        }
+
+        float x1 = cx - w * 0.5f;
+        float y1 = cy - h * 0.5f;
+        filterBoxes.push_back(x1);
+        filterBoxes.push_back(y1);
+        filterBoxes.push_back(w);
+        filterBoxes.push_back(h);
+        objProbs.push_back(max_score);
+        classId.push_back(max_class_id);
+        validCount++;
+    }
+
+    printf("plate_post(single): anchors=%d ch=%d conf_thr=%.3f valid=%d best_score=%.4f "
+           "best_box=cxcywh(%.1f,%.1f,%.1f,%.1f) cx_range[%.1f,%.1f]\n",
+           num_anchors, channels, conf_threshold, validCount, dbg_best_score, dbg_best_cx,
+           dbg_best_cy, dbg_best_w, dbg_best_h, dbg_coord_min, dbg_coord_max);
+
+    if (validCount <= 0) {
+        return 0;
+    }
+
+    std::vector<int> indexArray;
+    for (int i = 0; i < validCount; ++i) {
+        indexArray.push_back(i);
+    }
+    quick_sort_indice_inverse(objProbs, 0, validCount - 1, indexArray);
+
+    std::set<int> class_set(std::begin(classId), std::end(classId));
+    for (auto c : class_set) {
+        nms(validCount, filterBoxes, classId, indexArray, c, nms_threshold);
+    }
+
+    int last_count = 0;
+    od_results->count = 0;
+    for (int i = 0; i < validCount; ++i) {
+        if (indexArray[i] == -1 || last_count >= OBJ_NUMB_MAX_SIZE) {
+            continue;
+        }
+        int n = indexArray[i];
+
+        float x1 = filterBoxes[n * 4 + 0] - letter_box->x_pad;
+        float y1 = filterBoxes[n * 4 + 1] - letter_box->y_pad;
+        float x2 = x1 + filterBoxes[n * 4 + 2];
+        float y2 = y1 + filterBoxes[n * 4 + 3];
+        int id = classId[n];
+        float obj_conf = objProbs[n];
+
+        od_results->results[last_count].box.left =
+            clamp_int(x1, 0, model_in_w) / letter_box->scale;
+        od_results->results[last_count].box.top =
+            clamp_int(y1, 0, model_in_h) / letter_box->scale;
+        od_results->results[last_count].box.right =
+            clamp_int(x2, 0, model_in_w) / letter_box->scale;
+        od_results->results[last_count].box.bottom =
+            clamp_int(y2, 0, model_in_h) / letter_box->scale;
+        od_results->results[last_count].prop = obj_conf;
+        od_results->results[last_count].cls_id = id;
+        last_count++;
+    }
+    od_results->count = last_count;
+    return 0;
+}
+
 extern "C" int plate_post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box,
                             float conf_threshold, float nms_threshold,
                             object_detect_result_list *od_results)
@@ -259,8 +462,13 @@ extern "C" int plate_post_process(rknn_app_context_t *app_ctx, void *outputs, le
 
     memset(od_results, 0, sizeof(object_detect_result_list));
 
-    int dfl_len = app_ctx->output_attrs[0].dims[1] / 4;
-    int output_per_branch = app_ctx->io_num.n_output / 3;
+    if (app_ctx->io_num.n_output == 1) {
+        return post_process_single_output(app_ctx, _outputs, letter_box, conf_threshold,
+                                          nms_threshold, od_results);
+    }
+
+    int class_num = app_ctx->model_class_num > 0 ? app_ctx->model_class_num : 1;
+    int output_per_branch = app_ctx->io_num.n_output >= 3 ? (int)app_ctx->io_num.n_output / 3 : 1;
     for (int i = 0; i < 3; i++) {
         void *score_sum = nullptr;
         int32_t score_sum_zp = 0;
@@ -272,9 +480,18 @@ extern "C" int plate_post_process(rknn_app_context_t *app_ctx, void *outputs, le
         }
         int box_idx = i * output_per_branch;
         int score_idx = i * output_per_branch + 1;
+        if (box_idx >= (int)app_ctx->io_num.n_output || score_idx >= (int)app_ctx->io_num.n_output) {
+            break;
+        }
 
-        grid_h = app_ctx->output_attrs[box_idx].dims[2];
-        grid_w = app_ctx->output_attrs[box_idx].dims[3];
+        int dfl_len = app_ctx->output_attrs[box_idx].dims[1] / 4;
+        if (dfl_len <= 0) {
+            dfl_len = 16;
+        }
+        parse_grid_hw(&app_ctx->output_attrs[box_idx], &grid_h, &grid_w);
+        if (grid_h <= 0 || grid_w <= 0) {
+            continue;
+        }
         stride = model_in_h / grid_h;
 
         if (app_ctx->is_quant) {
@@ -283,12 +500,12 @@ extern "C" int plate_post_process(rknn_app_context_t *app_ctx, void *outputs, le
                 app_ctx->output_attrs[box_idx].scale, (int8_t *)_outputs[score_idx].buf,
                 app_ctx->output_attrs[score_idx].zp, app_ctx->output_attrs[score_idx].scale,
                 (int8_t *)score_sum, score_sum_zp, score_sum_scale, grid_h, grid_w, stride,
-                dfl_len, filterBoxes, objProbs, classId, conf_threshold);
+                dfl_len, class_num, filterBoxes, objProbs, classId, conf_threshold);
         } else {
             validCount += process_fp32((float *)_outputs[box_idx].buf,
                                        (float *)_outputs[score_idx].buf, (float *)score_sum,
-                                       grid_h, grid_w, stride, dfl_len, filterBoxes, objProbs,
-                                       classId, conf_threshold);
+                                       grid_h, grid_w, stride, dfl_len, class_num, filterBoxes,
+                                       objProbs, classId, conf_threshold);
         }
     }
 
@@ -349,8 +566,11 @@ extern "C" void plate_deinit_post_process(void)
 
 extern "C" const char *plate_cls_to_name(int cls_id)
 {
-    if (cls_id < 0 || cls_id >= OBJ_CLASS_NUM) {
+    if (cls_id < 0) {
         return "null";
     }
-    return kPlateLabels[cls_id];
+    if (cls_id < OBJ_CLASS_NUM) {
+        return kPlateLabels[cls_id];
+    }
+    return "plate";
 }

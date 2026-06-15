@@ -54,7 +54,7 @@ static const desktop_app_t apps[] = {
      LV_COLOR_MAKE(0x2e, 0xd5, 0x73), LV_COLOR_MAKE(0x11, 0x8c, 0x4f)},
     {APP_ID_FACE, "人脸识别", "人脸检测与身份识别", "FACE",
      LV_COLOR_MAKE(0xf5, 0x9e, 0x0b), LV_COLOR_MAKE(0xd9, 0x77, 0x06)},
-    {APP_ID_PLATE, "车牌识别", "车牌检测与号牌识别", "LPR",
+    {APP_ID_PLATE, "车牌检测", "检测车牌区域并画框", "PLATE",
      LV_COLOR_MAKE(0x06, 0xb6, 0xd4), LV_COLOR_MAKE(0x0e, 0x94, 0x99)},
     {APP_ID_SEG, "目标分割", "实例分割与掩码", "SEG",
      LV_COLOR_MAKE(0xa8, 0x55, 0xf7), LV_COLOR_MAKE(0x7c, 0x3a, 0xed)},

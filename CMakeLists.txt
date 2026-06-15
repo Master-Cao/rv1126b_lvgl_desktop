@@ -88,6 +88,8 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/services/algorithms/detect SERVICE_DE
 aux_source_directory(${PROJECT_SOURCE_DIR}/services/algorithms/hair SERVICE_HAIR_ALGO_SRCS)
 aux_source_directory(${PROJECT_SOURCE_DIR}/services/algorithms/face SERVICE_FACE_ALGO_SRCS)
 aux_source_directory(${PROJECT_SOURCE_DIR}/services/algorithms/plate SERVICE_PLATE_ALGO_SRCS)
+list(REMOVE_ITEM SERVICE_PLATE_ALGO_SRCS
+        ${PROJECT_SOURCE_DIR}/services/algorithms/plate/plate_test.cc)
 aux_source_directory(${PROJECT_SOURCE_DIR}/services/algorithms/seg SERVICE_SEG_ALGO_SRCS)
 set(SERVICE_SRCS
         ${SERVICE_CAMERA_SRCS}
@@ -111,6 +113,19 @@ target_link_libraries(${DESKTOP_TARGET}
         lvgl lv_drivers freetype drm evdev pthread jpeg
         rknnrt
         opencv_core opencv_imgproc opencv_imgcodecs
+)
+
+# 板端离线测试：不链接 LVGL，仅 plate RKNN 推理
+set(PLATE_TEST_SRCS
+        ${PROJECT_SOURCE_DIR}/services/algorithms/plate/yolov8_plate.cc
+        ${PROJECT_SOURCE_DIR}/services/algorithms/plate/postprocess.cc
+        ${PROJECT_SOURCE_DIR}/services/algorithms/plate/plate_test.cc
+)
+add_executable(plate_test ${PLATE_TEST_SRCS})
+target_link_libraries(plate_test
+        rknnrt
+        opencv_core opencv_imgproc opencv_imgcodecs
+        pthread
 )
 
 add_custom_target(distclean

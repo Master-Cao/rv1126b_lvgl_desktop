@@ -103,7 +103,8 @@ static int convert_image_with_letterbox_cpu(image_buffer_t *src_image, image_buf
     cv::Mat dst_mat(dst_h, dst_w, CV_8UC3, dst_image->virt_addr);
     dst_mat.setTo(cv::Scalar(fill_color, fill_color, fill_color));
 
-    cv::Mat src_mat(src_h, src_w, CV_8UC3, src_image->virt_addr);
+    cv::Mat src_mat(src_h, src_w, CV_8UC3, src_image->virt_addr,
+                    (size_t)(src_image->width_stride > 0 ? src_image->width_stride : src_w * 3));
     cv::Mat roi = dst_mat(cv::Rect(pad_x, pad_y, resize_w, resize_h));
     cv::resize(src_mat, roi, cv::Size(resize_w, resize_h), 0, 0, cv::INTER_LINEAR);
 
@@ -120,6 +121,37 @@ static void dump_tensor_attr(rknn_tensor_attr *attr)
            attr->index, attr->name, attr->n_dims, attr->dims[0], attr->dims[1], attr->dims[2],
            attr->dims[3], attr->n_elems, attr->size, get_format_string(attr->fmt),
            get_type_string(attr->type), get_qnt_type_string(attr->qnt_type), attr->zp, attr->scale);
+}
+
+static int parse_score_class_num(const rknn_tensor_attr *attr)
+{
+    if (!attr || attr->n_dims < 2) {
+        return 1;
+    }
+    if (attr->fmt == RKNN_TENSOR_NCHW) {
+        return attr->dims[1] > 0 ? attr->dims[1] : 1;
+    }
+    return attr->dims[attr->n_dims - 1] > 0 ? attr->dims[attr->n_dims - 1] : 1;
+}
+
+static void parse_grid_hw(const rknn_tensor_attr *attr, int *grid_h, int *grid_w)
+{
+    if (!attr || !grid_h || !grid_w || attr->n_dims < 4) {
+        if (grid_h) {
+            *grid_h = 0;
+        }
+        if (grid_w) {
+            *grid_w = 0;
+        }
+        return;
+    }
+    if (attr->fmt == RKNN_TENSOR_NCHW) {
+        *grid_h = attr->dims[2];
+        *grid_w = attr->dims[3];
+    } else {
+        *grid_h = attr->dims[1];
+        *grid_w = attr->dims[2];
+    }
 }
 
 extern "C" int plate_init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
@@ -179,12 +211,41 @@ extern "C" int plate_init_yolov8_model(const char *model_path, rknn_app_context_
 
     app_ctx->rknn_ctx = ctx;
     app_ctx->is_quant = (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
-                        output_attrs[0].type == RKNN_TENSOR_INT8);
+                         output_attrs[0].type != RKNN_TENSOR_FLOAT16);
     app_ctx->io_num = io_num;
     app_ctx->input_attrs = (rknn_tensor_attr *)malloc(io_num.n_input * sizeof(rknn_tensor_attr));
     memcpy(app_ctx->input_attrs, input_attrs, io_num.n_input * sizeof(rknn_tensor_attr));
     app_ctx->output_attrs = (rknn_tensor_attr *)malloc(io_num.n_output * sizeof(rknn_tensor_attr));
     memcpy(app_ctx->output_attrs, output_attrs, io_num.n_output * sizeof(rknn_tensor_attr));
+
+    int output_per_branch = io_num.n_output >= 3 ? (int)io_num.n_output / 3 : 1;
+    if (io_num.n_output == 1) {
+        const rknn_tensor_attr *a = &output_attrs[0];
+        int channels = 1;
+        if (a->n_dims == 3) {
+            channels = (a->dims[1] < a->dims[2]) ? a->dims[1] : a->dims[2];
+        } else if (a->n_dims >= 4) {
+            channels = (a->fmt == RKNN_TENSOR_NCHW) ? a->dims[1] : a->dims[a->n_dims - 1];
+        }
+        app_ctx->model_class_num = channels > 4 ? channels - 4 : 1;
+        printf("plate_yolov8: single-output head (Ultralytics), channels=%d class_num=%d\n",
+               channels, app_ctx->model_class_num);
+    } else {
+        /* 分离输出 DFL：每个 stride 顺序为 [reg, cls, (score_sum)]，
+         * 类别数取第一个 cls 分支（index 1）的通道数。 */
+        int score_attr_idx = 1;
+        if (score_attr_idx < (int)io_num.n_output) {
+            app_ctx->model_class_num = parse_score_class_num(&output_attrs[score_attr_idx]);
+        } else {
+            app_ctx->model_class_num = 1;
+        }
+        if (io_num.n_output % 3 == 0 && output_per_branch >= 2) {
+            printf("plate_yolov8: %d-output DFL head (per_branch=%d, rknn_model_zoo)\n",
+                   io_num.n_output, output_per_branch);
+        } else {
+            printf("plate_yolov8: WARN output num=%d (expect 1, 6 or 9)\n", io_num.n_output);
+        }
+    }
 
     if (input_attrs[0].fmt == RKNN_TENSOR_NCHW) {
         printf("plate_yolov8: NCHW input fmt\n");
@@ -197,8 +258,9 @@ extern "C" int plate_init_yolov8_model(const char *model_path, rknn_app_context_
         app_ctx->model_width = input_attrs[0].dims[2];
         app_ctx->model_channel = input_attrs[0].dims[3];
     }
-    printf("plate_yolov8: input height=%d, width=%d, channel=%d, is_quant=%d\n",
-           app_ctx->model_height, app_ctx->model_width, app_ctx->model_channel, app_ctx->is_quant);
+    printf("plate_yolov8: input height=%d, width=%d, channel=%d, class_num=%d, is_quant=%d\n",
+           app_ctx->model_height, app_ctx->model_width, app_ctx->model_channel,
+           app_ctx->model_class_num, app_ctx->is_quant ? 1 : 0);
     return 0;
 }
 
@@ -222,13 +284,18 @@ extern "C" int plate_release_yolov8_model(rknn_app_context_t *app_ctx)
 extern "C" int plate_inference_yolov8_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
                                             object_detect_result_list *od_results)
 {
+    return plate_inference_yolov8_model_ex(app_ctx, img, od_results, BOX_THRESH, NMS_THRESH);
+}
+
+extern "C" int plate_inference_yolov8_model_ex(rknn_app_context_t *app_ctx, image_buffer_t *img,
+                                            object_detect_result_list *od_results,
+                                            float box_conf_threshold, float nms_threshold)
+{
     int ret;
     image_buffer_t dst_img;
     letterbox_t letter_box;
     rknn_input inputs[app_ctx->io_num.n_input];
     rknn_output outputs[app_ctx->io_num.n_output];
-    const float nms_threshold = NMS_THRESH;
-    const float box_conf_threshold = BOX_THRESH;
     int bg_color = 114;
 
     if (!app_ctx || !img || !od_results) {
@@ -280,7 +347,12 @@ extern "C" int plate_inference_yolov8_model(rknn_app_context_t *app_ctx, image_b
 
     for (uint32_t i = 0; i < app_ctx->io_num.n_output; i++) {
         outputs[i].index = i;
-        outputs[i].want_float = (!app_ctx->is_quant);
+        /* Ultralytics 单路输出需 float 解码；9 路 DFL 头保持 int8 原样反量化 */
+        if (app_ctx->io_num.n_output == 1) {
+            outputs[i].want_float = 1;
+        } else {
+            outputs[i].want_float = app_ctx->is_quant ? 0 : 1;
+        }
     }
     ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
     if (ret < 0) {

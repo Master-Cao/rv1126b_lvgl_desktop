@@ -11,6 +11,7 @@
 | `face_det.rknn` | 人脸检测（SCRFD，bbox + 5 关键点） | `/opt/rv1126b_desktop/models/face_det.rknn` |
 | `face_rec.rknn` | 人脸识别特征提取（待接入） | `/opt/rv1126b_desktop/models/face_rec.rknn` |
 | `plate_det.rknn` | 车牌检测 | `/opt/rv1126b_desktop/models/plate_det.rknn` |
+| `plate.rknn` | 车牌检测（备用文件名） | `/opt/rv1126b_desktop/models/plate.rknn` |
 | `plate_rec.rknn` | 车牌字符识别（LPRNet） | `/opt/rv1126b_desktop/models/plate_rec.rknn` |
 | `yolov8_seg.rknn` | 目标实例分割 | `/opt/rv1126b_desktop/models/yolov8_seg.rknn` |
 

@@ -13,8 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #define DEFAULT_DET_MODEL_PATH "/opt/rv1126b_desktop/models/plate_det.rknn"
+#define ALT_DET_MODEL_PATH     "/opt/rv1126b_desktop/models/plate.rknn"
 
 struct plate_algo {
     char det_model_path[256];
@@ -37,6 +39,7 @@ struct plate_algo {
     uint32_t result_seq;
 
     algo_state_t state;
+    uint32_t infer_log_seq;
 };
 
 static double now_ms()
@@ -46,16 +49,28 @@ static double now_ms()
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-static const char *resolve_path(const char *prefer, const char *env_key, const char *fallback)
+static bool path_readable(const char *path)
 {
-    if (prefer && prefer[0]) {
+    return path && path[0] && access(path, R_OK) == 0;
+}
+
+static const char *resolve_det_model_path(const char *prefer)
+{
+    if (prefer && prefer[0] && path_readable(prefer)) {
         return prefer;
     }
-    const char *env = getenv(env_key);
-    if (env && env[0]) {
+    const char *env = getenv("PLATE_DET_MODEL");
+    if (env && env[0] && path_readable(env)) {
         return env;
     }
-    return fallback;
+    if (path_readable(DEFAULT_DET_MODEL_PATH)) {
+        return DEFAULT_DET_MODEL_PATH;
+    }
+    if (path_readable(ALT_DET_MODEL_PATH)) {
+        return ALT_DET_MODEL_PATH;
+    }
+    /* 回退到默认名，便于 init 报错时打印期望路径 */
+    return DEFAULT_DET_MODEL_PATH;
 }
 
 static void copy_results(const object_detect_result_list &src, plate_result_set_t *dst, int src_w,
@@ -88,11 +103,7 @@ static void copy_results(const object_detect_result_list &src, plate_result_set_
         p.det_score = r.prop;
         p.rec_score = 0.0f;
 
-        const char *name = plate_cls_to_name(r.cls_id);
-        if (!name) {
-            name = "plate";
-        }
-        snprintf(p.text, sizeof(p.text), "%s", name);
+        snprintf(p.text, sizeof(p.text), "plate");
     }
 }
 
@@ -219,6 +230,12 @@ static void *worker_thread_fn(void *arg)
 
         if (ret == 0 && local.count > 0) {
             printf("plate: %d boxes, %d ms\n", local.count, det_ms);
+        } else if (ret == 0) {
+            uint32_t n = ++algo->infer_log_seq;
+            if (n <= 3 || (n % 30) == 0) {
+                printf("plate: no box (frame %u, %dx%d, %d ms, class_num=%d)\n", n,
+                       local.src_w, local.src_h, det_ms, algo->det_ctx.model_class_num);
+            }
         }
     }
 
@@ -242,11 +259,11 @@ extern "C" plate_algo_t *plate_algo_create(const plate_algo_config_t *config)
     memset(&algo->latest, 0, sizeof(algo->latest));
     algo->result_dirty = false;
     algo->result_seq = 0;
+    algo->infer_log_seq = 0;
     algo->state = ALGO_STATE_IDLE;
 
     const char *det = config ? config->det_model_path : NULL;
-    snprintf(algo->det_model_path, sizeof(algo->det_model_path), "%s",
-             resolve_path(det, "PLATE_DET_MODEL", DEFAULT_DET_MODEL_PATH));
+    snprintf(algo->det_model_path, sizeof(algo->det_model_path), "%s", resolve_det_model_path(det));
 
     pthread_mutex_init(&algo->mutex, NULL);
     pthread_cond_init(&algo->cond, NULL);

@@ -94,9 +94,13 @@ if [[ ${DO_INSTALL} -eq 1 ]]; then
 fi
 
 BIN_PATH=${BUILD_DIR}/${TARGET}
+PLATE_TEST_PATH=${BUILD_DIR}/plate_test
 if [[ -f ${BIN_PATH} ]]; then
     echo ""
     echo -e "\e[92m[OK] build finished: ${BIN_PATH}\e[0m"
+    if [[ -f ${PLATE_TEST_PATH} ]]; then
+        echo -e "\e[92m[OK] plate_test:    ${PLATE_TEST_PATH}\e[0m"
+    fi
     echo ""
     echo "板端部署示例："
     echo "  ssh root@<board> 'mkdir -p /opt/rv1126b_desktop/models'"
@@ -104,6 +108,10 @@ if [[ -f ${BIN_PATH} ]]; then
     echo "  scp ${ROOT_DIR}/models/ppocrv4_det.rknn  root@<board>:/opt/rv1126b_desktop/models/"
     echo "  scp ${ROOT_DIR}/models/ppocrv4_rec.rknn  root@<board>:/opt/rv1126b_desktop/models/"
     echo "  scp ${ROOT_DIR}/models/yolov8.rknn       root@<board>:/opt/rv1126b_desktop/models/"
+    if [[ -f ${PLATE_TEST_PATH} ]]; then
+        echo "  scp ${PLATE_TEST_PATH}                   root@<board>:/opt/rv1126b_desktop/"
+        echo "  scp ${ROOT_DIR}/scripts/plate_board_test.sh root@<board>:/opt/rv1126b_desktop/"
+    fi
     echo ""
     echo "或在板端使用脚本一次部署所有模型："
     echo "  ${ROOT_DIR}/scripts/install_board.sh -m ${ROOT_DIR}/models -s"

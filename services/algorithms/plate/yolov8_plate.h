@@ -23,6 +23,7 @@ typedef struct {
     int model_channel;
     int model_width;
     int model_height;
+    int model_class_num;
     bool is_quant;
 } rknn_app_context_t;
 
@@ -36,6 +37,9 @@ int plate_init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
 int plate_release_yolov8_model(rknn_app_context_t *app_ctx);
 int plate_inference_yolov8_model(rknn_app_context_t *app_ctx, image_buffer_t *img,
                                  object_detect_result_list *od_results);
+int plate_inference_yolov8_model_ex(rknn_app_context_t *app_ctx, image_buffer_t *img,
+                                    object_detect_result_list *od_results,
+                                    float box_conf_threshold, float nms_threshold);
 
 int plate_post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box,
                        float conf_threshold, float nms_threshold,
